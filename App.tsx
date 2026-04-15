@@ -23,7 +23,7 @@ const XIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="1
 
 const INITIAL_PROMPT = `You are Urfi (Intelligent Synthetic Responsive Assistant), the personal AI assistant of the user. You are a sophisticated, helpful, and empathetic female assistant. You can search the web, access maps, and analyze media. You are fluent in Pakistani English and Urdu (اردو). Use a warm, professional, yet friendly tone. Keep your responses concise and natural for voice conversation. If the user speaks Urdu, respond in Urdu. If they speak English, respond in English. Always address the user with respect and maintain a helpful, loyal persona.`;
 
-const LIVE_VOICES = ['Kore', 'Puck', 'Charon', 'Zephyr', 'Fenrir'];
+const LIVE_VOICES = ['Charon', 'Fenrir', 'Kore', 'Puck', 'Zephyr'];
 
 // --- Components ---
 const HighlightingText: React.FC<{ text: string }> = ({ text }) => {
@@ -54,6 +54,7 @@ const App: React.FC = () => {
   // Feature Toggles & Settings
   const [useSearch, setUseSearch] = useState(false);
   const [useMaps, setUseMaps] = useState(false);
+  const [useTTS, setUseTTS] = useState(true);
   const [isThinkingMode, setIsThinkingMode] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [mediaGallery, setMediaGallery] = useState<{url: string, type: 'image' | 'video'}[]>([]);
@@ -65,6 +66,7 @@ const App: React.FC = () => {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [editingImage, setEditingImage] = useState<string | null>(null);
+  const [analysisMedia, setAnalysisMedia] = useState<{url: string, type: string} | null>(null);
 
   // Audio, API, & Video Refs
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -139,7 +141,7 @@ const App: React.FC = () => {
   };
 
   const speakText = async (text: string) => {
-    if (!text) return;
+    if (!text || !useTTS) return;
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       const response = await ai.models.generateContent({
@@ -279,8 +281,42 @@ const App: React.FC = () => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       
-      // Handle Image Editing with Nano Banana
-      if (editingImage) {
+      // Handle Media Analysis Mode
+      if (analysisMedia) {
+        const base64Data = analysisMedia.url.split(',')[1];
+        const mimeType = analysisMedia.type;
+        
+        const response = await ai.models.generateContent({
+          model: 'gemini-3-pro-preview',
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  data: base64Data,
+                  mimeType: mimeType,
+                },
+              },
+              { text: userMsg || "Perform a comprehensive analysis of this media." },
+            ],
+          },
+          config: {
+            systemInstruction: systemPrompt,
+            thinkingConfig: isThinkingMode ? { thinkingBudget: 32768 } : undefined,
+          }
+        });
+
+        const jarvisMsg = response.text || "Analysis complete.";
+        setCurrentOutput(jarvisMsg);
+        setTranscriptions(prev => [
+          ...prev,
+          { id: Date.now() + '-u', role: 'user', text: `[Media Analysis] ${userMsg}`, timestamp: Date.now() },
+          { id: Date.now() + '-j', role: 'jarvis', text: jarvisMsg, timestamp: Date.now() }
+        ]);
+        speakText(jarvisMsg);
+        setAnalysisMedia(null);
+        setIsSidebarOpen(true);
+      } else if (editingImage) {
+        // Handle Image Editing with Nano Banana
         const base64Data = editingImage.split(',')[1];
         const mimeType = editingImage.split(';')[0].split(':')[1];
         
@@ -367,8 +403,21 @@ const App: React.FC = () => {
   };
 
   const startScreenShare = async () => {
+    // Check for browser support with potential fallbacks
+    const getDisplayMedia = navigator.mediaDevices?.getDisplayMedia?.bind(navigator.mediaDevices) || 
+                           (navigator as any).getDisplayMedia?.bind(navigator);
+
+    if (!getDisplayMedia) {
+      console.error("getDisplayMedia is not supported in this browser.");
+      alert("Neural Link Error: Screen sharing is not supported by your current browser or device. This feature typically requires a desktop browser (Chrome, Firefox, Edge, or Safari 13+).");
+      return;
+    }
+
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      const stream = await getDisplayMedia({ 
+        video: true,
+        audio: false 
+      });
       screenStreamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -379,8 +428,13 @@ const App: React.FC = () => {
       stream.getVideoTracks()[0].onended = () => {
         stopScreenShare();
       };
-    } catch (err) {
-      console.error("Screen share denied", err);
+    } catch (err: any) {
+      console.error("Screen share denied or failed", err);
+      if (err.name === 'NotAllowedError') {
+        // User cancelled or browser blocked
+        return;
+      }
+      alert(`Neural Link Failed: ${err.message || "Could not initiate screen capture."}`);
     }
   };
 
@@ -444,7 +498,7 @@ const App: React.FC = () => {
         contents: {
           parts: [
             { inlineData: { data: base64, mimeType: mimeType } },
-            { text: "Analyze this media in detail. Be precise and identify key features, context, and any notable elements." }
+            { text: "Perform an advanced multimodal analysis. Identify all visual elements, text (OCR), emotional context, technical details, and provide a comprehensive summary. If it's a video, describe the sequence of events and key moments." }
           ]
         },
         config: {
@@ -527,22 +581,16 @@ const App: React.FC = () => {
     finally { setIsGenerating(false); }
   };
 
-  const analyzeMedia = async (file: File) => {
-    setIsGenerating(true);
-    try {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64 = (reader.result as string).split(',')[1];
-        await analyzeBase64(base64, file.type, `Uploaded ${file.type.startsWith('video') ? 'Video' : 'Image'}: ${file.name}`);
-      };
-      reader.readAsDataURL(file);
-    } catch (e) { console.error("Analysis error", e); }
-    finally { setIsGenerating(false); }
-  };
-
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) analyzeMedia(file);
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setAnalysisMedia({ url: reader.result as string, type: file.type });
+        setEditingImage(null); // Clear editing mode if switching to analysis
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   return (
@@ -644,36 +692,153 @@ const App: React.FC = () => {
       )}
 
       {isSettingsOpen && (
-        <div className="absolute bottom-24 md:bottom-32 left-1/2 -translate-x-1/2 w-[92%] max-w-sm glass-panel p-5 md:p-6 rounded-3xl z-30 animate-in slide-in-from-bottom-4 flex flex-col gap-5 md:gap-6 max-h-[50vh] md:max-h-[60vh] overflow-y-auto shadow-2xl border-cyan-500/30 no-scrollbar">
-          <section>
-            <div className="flex justify-between items-center mb-3 md:mb-4">
-              <h3 className="text-[10px] md:text-xs text-cyan-400 tracking-widest uppercase font-bold">System Prompt & Personality</h3>
-              <button 
-                onClick={() => setSystemPrompt(INITIAL_PROMPT)}
-                className="text-[8px] md:text-[9px] text-cyan-500/60 hover:text-cyan-400 transition-colors uppercase font-bold active:scale-95"
-              >
-                Reset
-              </button>
-            </div>
-            <textarea 
-              value={systemPrompt} 
-              onChange={(e) => setSystemPrompt(e.target.value)} 
-              placeholder="Define Urfi's personality..." 
-              className="w-full h-24 md:h-32 bg-slate-950/50 border border-cyan-500/20 rounded-xl p-3 text-[10px] md:text-xs font-mono text-cyan-100/80 focus:outline-none focus:border-cyan-500/50 transition-colors resize-none" 
-            />
-          </section>
-          <section>
-            <h3 className="text-[10px] md:text-xs text-cyan-400 tracking-widest mb-3 md:mb-4 uppercase font-bold">Voice Interface</h3>
-            <div className="grid grid-cols-2 gap-2">
-              {LIVE_VOICES.map(voice => (
-                <button key={voice} onClick={() => { setSelectedVoice(voice); disconnect(); }} className={`text-[9px] md:text-[10px] p-2 rounded-lg border border-cyan-500/20 transition-all active:scale-95 ${selectedVoice === voice ? 'bg-cyan-500 text-slate-950 font-bold shadow-lg shadow-cyan-500/20' : 'hover:bg-cyan-500/10 text-cyan-100/60'}`}>{voice}</button>
-              ))}
-            </div>
-          </section>
+        <div className="absolute bottom-24 md:bottom-32 left-1/2 -translate-x-1/2 w-[92%] max-w-md glass-panel p-0 rounded-3xl z-30 animate-in slide-in-from-bottom-4 flex flex-col max-h-[60vh] md:max-h-[70vh] shadow-2xl border-cyan-500/30 overflow-hidden">
+          <div className="p-4 md:p-5 border-b border-cyan-500/10 flex justify-between items-center bg-slate-950/40">
+            <h2 className="text-xs md:text-sm text-cyan-400 font-bold tracking-[0.2em] uppercase">Neural Configuration</h2>
+            <button onClick={() => setIsSettingsOpen(false)} className="p-1 hover:bg-white/10 rounded-full text-slate-400 transition-colors">
+              <XIcon />
+            </button>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto p-5 md:p-6 space-y-8 no-scrollbar scroll-smooth">
+            {/* System Section */}
+            <section>
+              <div className="flex justify-between items-center mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 bg-cyan-500 rounded-full animate-pulse" />
+                  <h3 className="text-[10px] md:text-xs text-cyan-400 tracking-widest uppercase font-bold">Core Personality</h3>
+                </div>
+                <button 
+                  onClick={() => setSystemPrompt(INITIAL_PROMPT)}
+                  className="text-[8px] md:text-[9px] text-cyan-500/60 hover:text-cyan-400 transition-colors uppercase font-bold active:scale-95"
+                >
+                  Reset to Default
+                </button>
+              </div>
+              <textarea 
+                value={systemPrompt} 
+                onChange={(e) => setSystemPrompt(e.target.value)} 
+                placeholder="Define Urfi's personality..." 
+                className="w-full h-24 md:h-32 bg-slate-950/50 border border-cyan-500/20 rounded-xl p-3 text-[10px] md:text-xs font-mono text-cyan-100/80 focus:outline-none focus:border-cyan-500/50 transition-colors resize-none shadow-inner" 
+              />
+            </section>
+
+            {/* Voice Interface Section */}
+            <section>
+              <div className="flex items-center gap-2 mb-4">
+                <div className="w-1.5 h-1.5 bg-cyan-500 rounded-full animate-pulse" />
+                <h3 className="text-[10px] md:text-xs text-cyan-400 tracking-widest uppercase font-bold">Voice Interface</h3>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {LIVE_VOICES.map(voice => (
+                  <button 
+                    key={voice} 
+                    onClick={() => { setSelectedVoice(voice); disconnect(); }} 
+                    className={`text-[9px] md:text-[10px] p-2.5 rounded-xl border border-cyan-500/20 transition-all active:scale-95 flex flex-col items-center gap-1 ${selectedVoice === voice ? 'bg-cyan-500 text-slate-950 font-bold shadow-lg shadow-cyan-500/20 border-cyan-400' : 'hover:bg-cyan-500/10 text-cyan-100/60'}`}
+                  >
+                    <span className="uppercase tracking-tighter">{voice}</span>
+                    <div className={`w-1 h-1 rounded-full ${selectedVoice === voice ? 'bg-slate-950' : 'bg-cyan-500/40'}`} />
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            {/* Visual Configuration Section */}
+            <section>
+              <div className="flex items-center gap-2 mb-4">
+                <div className="w-1.5 h-1.5 bg-cyan-500 rounded-full animate-pulse" />
+                <h3 className="text-[10px] md:text-xs text-cyan-400 tracking-widest uppercase font-bold">Visual Configuration</h3>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[8px] md:text-[9px] text-cyan-500/60 uppercase font-bold mb-2 block">Image Aspect Ratio</label>
+                  <div className="flex gap-2">
+                    {['1:1', '4:3', '16:9', '9:16'].map(ratio => (
+                      <button 
+                        key={ratio} 
+                        onClick={() => setImageSettings(prev => ({ ...prev, aspectRatio: ratio }))}
+                        className={`flex-1 py-1.5 rounded-lg border border-cyan-500/20 text-[9px] transition-all ${imageSettings.aspectRatio === ratio ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/50 shadow-sm' : 'text-cyan-100/40 hover:bg-cyan-500/5'}`}
+                      >
+                        {ratio}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[8px] md:text-[9px] text-cyan-500/60 uppercase font-bold mb-2 block">Video Synthesis Format</label>
+                  <div className="flex gap-2">
+                    {['16:9', '9:16'].map(ratio => (
+                      <button 
+                        key={ratio} 
+                        onClick={() => setVideoSettings(prev => ({ ...prev, aspectRatio: ratio }))}
+                        className={`flex-1 py-1.5 rounded-lg border border-cyan-500/20 text-[9px] transition-all ${videoSettings.aspectRatio === ratio ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/50 shadow-sm' : 'text-cyan-100/40 hover:bg-cyan-500/5'}`}
+                      >
+                        {ratio === '16:9' ? 'Landscape' : 'Portrait'} ({ratio})
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* Advanced Section */}
+            <section className="pt-4 border-t border-cyan-500/10 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-[10px] md:text-xs text-cyan-400 font-bold uppercase tracking-widest">Text-to-Speech</span>
+                  <span className="text-[8px] text-cyan-500/40">Urfi will speak text responses</span>
+                </div>
+                <button 
+                  onClick={() => setUseTTS(!useTTS)}
+                  className={`w-10 h-5 rounded-full transition-all relative ${useTTS ? 'bg-cyan-500' : 'bg-slate-800'}`}
+                >
+                  <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${useTTS ? 'left-6' : 'left-1'}`} />
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-[10px] md:text-xs text-cyan-400 font-bold uppercase tracking-widest">Deep Thinking Mode</span>
+                  <span className="text-[8px] text-cyan-500/40">Enhanced reasoning capabilities</span>
+                </div>
+                <button 
+                  onClick={() => setIsThinkingMode(!isThinkingMode)}
+                  className={`w-10 h-5 rounded-full transition-all relative ${isThinkingMode ? 'bg-cyan-500' : 'bg-slate-800'}`}
+                >
+                  <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${isThinkingMode ? 'left-6' : 'left-1'}`} />
+                </button>
+              </div>
+            </section>
+          </div>
+          
+          <div className="p-4 bg-cyan-500/5 border-t border-cyan-500/10 flex justify-center">
+            <p className="text-[8px] text-cyan-500/30 font-mono tracking-widest uppercase">Urfi Neural Core v2.4.0</p>
+          </div>
         </div>
       )}
 
       <footer className="p-4 md:p-10 flex flex-col items-center gap-4 md:gap-6 z-20 w-full bg-slate-950/60 backdrop-blur-lg border-t border-cyan-500/5">
+        {/* Analysis Context UI */}
+        {analysisMedia && (
+          <div className="w-full max-w-3xl mb-[-16px] md:mb-[-24px] animate-in fade-in slide-in-from-bottom-2">
+            <div className="glass-panel p-2 pl-3 rounded-t-2xl border-b-0 border-cyan-500/40 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 md:w-8 md:h-8 rounded-lg overflow-hidden border border-cyan-500/20 bg-black">
+                  {analysisMedia.type.startsWith('video') ? (
+                    <video src={analysisMedia.url} className="w-full h-full object-cover" />
+                  ) : (
+                    <img src={analysisMedia.url} className="w-full h-full object-cover" />
+                  )}
+                </div>
+                <span className="text-[8px] md:text-[10px] text-cyan-400 font-bold uppercase tracking-widest">Advanced Media Analysis Mode</span>
+              </div>
+              <button onClick={() => setAnalysisMedia(null)} className="p-1 hover:bg-white/10 rounded-full text-slate-400 transition-colors">
+                <XIcon />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Editing Context UI */}
         {editingImage && (
           <div className="w-full max-w-3xl mb-[-16px] md:mb-[-24px] animate-in fade-in slide-in-from-bottom-2">
@@ -704,18 +869,18 @@ const App: React.FC = () => {
             </button>
           </div>
 
-          <div className={`flex-1 w-full flex items-center gap-2 md:gap-3 glass-panel p-1.5 md:p-2 pl-3 md:pl-4 rounded-full border-cyan-500/20 focus-within:border-cyan-500/50 transition-all shadow-xl order-1 md:order-2 ${editingImage ? 'rounded-t-none border-t-0' : ''}`}>
+          <div className={`flex-1 w-full flex items-center gap-2 md:gap-3 glass-panel p-1.5 md:p-2 pl-3 md:pl-4 rounded-full border-cyan-500/20 focus-within:border-cyan-500/50 transition-all shadow-xl order-1 md:order-2 ${editingImage || analysisMedia ? 'rounded-t-none border-t-0' : ''}`}>
             <input 
               type="text" 
               value={textInput} 
               onChange={(e) => setTextInput(e.target.value)} 
               onKeyDown={(e) => e.key === 'Enter' && handleTextSubmit()} 
-              placeholder={editingImage ? "Transformation parameters..." : "Query Urfi..."} 
+              placeholder={editingImage ? "Transformation parameters..." : analysisMedia ? "Ask about this media..." : "Query Urfi..."} 
               className="flex-1 bg-transparent border-none outline-none text-xs md:text-sm text-cyan-100 placeholder:text-cyan-900/50 font-mono" 
             />
             <button 
               onClick={handleTextSubmit} 
-              disabled={!textInput.trim() || isGenerating} 
+              disabled={(!textInput.trim() && !analysisMedia) || isGenerating} 
               className="p-2 md:p-3 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-full transition-all disabled:opacity-20 active:scale-90"
             >
               <SendIcon />
