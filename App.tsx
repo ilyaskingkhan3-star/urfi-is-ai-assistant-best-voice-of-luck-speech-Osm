@@ -50,6 +50,7 @@ const App: React.FC = () => {
   const [currentOutput, setCurrentOutput] = useState('');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [textInput, setTextInput] = useState('');
+  const [language, setLanguage] = useState<'en' | 'ur'>('en');
   
   // Feature Toggles & Settings
   const [useSearch, setUseSearch] = useState(false);
@@ -252,7 +253,7 @@ const App: React.FC = () => {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } } },
-          systemInstruction: systemPrompt,
+          systemInstruction: systemPrompt + (language === 'ur' ? ' Respond in Urdu.' : ' Respond in English.'),
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           tools: [
@@ -351,7 +352,7 @@ const App: React.FC = () => {
           model: isThinkingMode ? 'gemini-3-pro-preview' : 'gemini-3-flash-preview',
           contents: userMsg,
           config: {
-            systemInstruction: systemPrompt,
+            systemInstruction: systemPrompt + (language === 'ur' ? ' Respond in Urdu.' : ' Respond in English.'),
             thinkingConfig: isThinkingMode ? { thinkingBudget: 32768 } : undefined,
             tools: useSearch ? [{ googleSearch: {} }] : undefined
           }
@@ -783,6 +784,19 @@ const App: React.FC = () => {
 
             {/* Advanced Section */}
             <section className="pt-4 border-t border-cyan-500/10 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-[10px] md:text-xs text-cyan-400 font-bold uppercase tracking-widest">Language</span>
+                  <span className="text-[8px] text-cyan-500/40">Switch between English and Urdu</span>
+                </div>
+                <button 
+                  onClick={() => setLanguage(language === 'en' ? 'ur' : 'en')}
+                  className="px-3 py-1 rounded-full bg-slate-800 text-cyan-400 text-[10px] uppercase font-bold"
+                >
+                  {language === 'en' ? 'English' : 'Urdu (اردو)'}
+                </button>
+              </div>
+
               <div className="flex items-center justify-between">
                 <div className="flex flex-col">
                   <span className="text-[10px] md:text-xs text-cyan-400 font-bold uppercase tracking-widest">Text-to-Speech</span>
