@@ -25,6 +25,8 @@ const INITIAL_PROMPT = `You are Urfi (Intelligent Synthetic Responsive Assistant
 
 const LIVE_VOICES = ['Charon', 'Fenrir', 'Kore', 'Puck', 'Zephyr'];
 
+const isUrdu = (text: string) => /[\u0600-\u06FF]/.test(text);
+
 // --- Components ---
 const HighlightingText: React.FC<{ text: string }> = ({ text }) => {
   const words = useMemo(() => text.split(/\s+/), [text]);
@@ -67,7 +69,7 @@ const App: React.FC = () => {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [editingImage, setEditingImage] = useState<string | null>(null);
-  const [analysisMedia, setAnalysisMedia] = useState<{url: string, type: string} | null>(null);
+  const [analysisMedia, setAnalysisMedia] = useState<{url: string, type: string, label?: string} | null>(null);
 
   // Audio, API, & Video Refs
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -109,7 +111,7 @@ const App: React.FC = () => {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const base64 = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
         sessionRef.current.sendRealtimeInput({
-          media: { data: base64, mimeType: 'image/jpeg' }
+          video: { data: base64, mimeType: 'image/jpeg' }
         });
       }
       
@@ -146,7 +148,7 @@ const App: React.FC = () => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
+        model: "gemini-3.1-flash-tts-preview",
         contents: [{ parts: [{ text }] }],
         config: {
           responseModalities: [Modality.AUDIO],
@@ -195,7 +197,7 @@ const App: React.FC = () => {
       micStreamRef.current = stream;
 
       const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+        model: 'gemini-3.1-flash-live-preview',
         callbacks: {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
@@ -211,7 +213,7 @@ const App: React.FC = () => {
               setAudioLevel(Math.min(rms * 10, 1)); // Scale for visual effect
 
               const pcmBlob = createBlob(inputData);
-              sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob })).catch(() => {});
+              sessionPromise.then(s => s.sendRealtimeInput({ audio: pcmBlob })).catch(() => {});
             };
             source.connect(scriptProcessor);
             scriptProcessor.connect(inputAudioContextRef.current!.destination);
@@ -231,7 +233,13 @@ const App: React.FC = () => {
               sourcesRef.current.add(source);
             }
             if (message.serverContent?.inputTranscription) {
-              setCurrentInput(prev => prev + (message.serverContent?.inputTranscription?.text || ''));
+              const text = message.serverContent?.inputTranscription?.text || '';
+              setCurrentInput(prev => prev + text);
+              if (isUrdu(text)) {
+                setLanguage('ur');
+              } else if (/[a-zA-Z]{3,}/.test(text)) {
+                setLanguage('en');
+              }
             }
             if (message.serverContent?.outputTranscription) {
               setCurrentOutput(prev => prev + (message.serverContent?.outputTranscription?.text || ''));
@@ -273,11 +281,17 @@ const App: React.FC = () => {
   };
 
   const handleTextSubmit = async () => {
-    if (!textInput.trim()) return;
+    if (!textInput.trim() && !analysisMedia) return;
     const userMsg = textInput;
+    
+    // Detect language
+    const detectedLang = isUrdu(userMsg) ? 'ur' : 'en';
+    setLanguage(detectedLang);
+    const langInstruction = detectedLang === 'ur' ? ' Respond in Urdu.' : ' Respond in English.';
+
     setTextInput('');
     setIsGenerating(true);
-    setCurrentInput(userMsg);
+    setCurrentInput(userMsg || "[Media Analysis]");
 
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
@@ -288,7 +302,7 @@ const App: React.FC = () => {
         const mimeType = analysisMedia.type;
         
         const response = await ai.models.generateContent({
-          model: 'gemini-3-pro-preview',
+          model: 'gemini-3.1-pro-preview',
           contents: {
             parts: [
               {
@@ -301,7 +315,7 @@ const App: React.FC = () => {
             ],
           },
           config: {
-            systemInstruction: systemPrompt,
+            systemInstruction: systemPrompt + langInstruction,
             thinkingConfig: isThinkingMode ? { thinkingBudget: 32768 } : undefined,
           }
         });
@@ -334,6 +348,9 @@ const App: React.FC = () => {
               { text: userMsg },
             ],
           },
+          config: {
+            systemInstruction: systemPrompt + langInstruction,
+          }
         });
 
         for (const part of response.candidates[0].content.parts) {
@@ -349,10 +366,10 @@ const App: React.FC = () => {
       } else {
         // Standard Text/Thinking Submission
         const response = await ai.models.generateContent({
-          model: isThinkingMode ? 'gemini-3-pro-preview' : 'gemini-3-flash-preview',
+          model: isThinkingMode ? 'gemini-3.1-pro-preview' : 'gemini-3-flash-preview',
           contents: userMsg,
           config: {
-            systemInstruction: systemPrompt + (language === 'ur' ? ' Respond in Urdu.' : ' Respond in English.'),
+            systemInstruction: systemPrompt + langInstruction,
             thinkingConfig: isThinkingMode ? { thinkingBudget: 32768 } : undefined,
             tools: useSearch ? [{ googleSearch: {} }] : undefined
           }
@@ -462,15 +479,22 @@ const App: React.FC = () => {
         if (status === ConnectionStatus.CONNECTED && sessionRef.current) {
           const base64 = dataUrl.split(',')[1];
           sessionRef.current.sendRealtimeInput({
-            media: { data: base64, mimeType: 'image/jpeg' }
+            video: { data: base64, mimeType: 'image/jpeg' }
           });
           // We don't stop the camera here if we're in a live session
           // Just trigger a verbal analysis request
           setCurrentInput("[High-Res Snapshot Analysis]");
         } else {
+          // Instead of immediate analysis, we "attach" it to the input context
+          setAnalysisMedia({ 
+            url: dataUrl, 
+            type: 'image/jpeg', 
+            label: isScreenSharing ? 'Screen Capture' : 'Lens Snapshot' 
+          });
           if (isScreenSharing) stopScreenShare();
           else stopCamera();
-          analyzeBase64(dataUrl, 'image/jpeg', isScreenSharing ? 'Screen Capture Analysis' : 'Direct Lens Analysis');
+          // Notify user that it's attached
+          setIsSidebarOpen(false); // Close sidebar to show the attachment UI
         }
       }
     }
@@ -495,7 +519,7 @@ const App: React.FC = () => {
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
+        model: 'gemini-3.1-pro-preview',
         contents: {
           parts: [
             { inlineData: { data: base64, mimeType: mimeType } },
@@ -558,7 +582,7 @@ const App: React.FC = () => {
       await ensureApiKey();
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       let operation = await ai.models.generateVideos({
-        model: 'veo-3.1-fast-generate-preview',
+        model: 'veo-3.1-lite-generate-preview',
         prompt: p,
         config: {
           numberOfVideos: 1,
@@ -587,7 +611,11 @@ const App: React.FC = () => {
     if (file) {
       const reader = new FileReader();
       reader.onloadend = () => {
-        setAnalysisMedia({ url: reader.result as string, type: file.type });
+        setAnalysisMedia({ 
+          url: reader.result as string, 
+          type: file.type,
+          label: file.name
+        });
         setEditingImage(null); // Clear editing mode if switching to analysis
       };
       reader.readAsDataURL(file);
@@ -599,15 +627,18 @@ const App: React.FC = () => {
       <div className="absolute inset-0 opacity-5 pointer-events-none" style={{ backgroundImage: 'radial-gradient(circle at 2px 2px, #06b6d4 1px, transparent 0)', backgroundSize: '60px 60px' }} />
       
       <header className="p-3 md:p-4 flex justify-between items-center z-20 bg-slate-950/40 backdrop-blur-xl border-b border-cyan-500/10">
-        <div className="flex items-center gap-2 md:gap-4">
-          <Logo size={28} className="md:w-[32px] md:h-[32px]" />
-          <div className="flex flex-col">
-            <h1 className="text-lg md:text-xl tracking-[0.2em] md:tracking-[0.4em] font-bold text-cyan-400 text-glow-cyan drop-shadow-sm select-none leading-none">
-              U<span className="opacity-50">.</span>R<span className="opacity-50">.</span>F<span className="opacity-50">.</span>I
-            </h1>
-            <span className="text-[7px] md:text-[8px] text-cyan-500/40 tracking-[0.1em] md:tracking-[0.2em] font-mono mt-0.5 md:mt-1">NEURAL INTERFACE v2.5</span>
+        <div className="flex items-center gap-3 md:gap-5">
+          <div className="relative flex items-center justify-center">
+            <div className="absolute inset-0 bg-cyan-500/20 rounded-full blur-md animate-pulse-slow"></div>
+            <Logo size={32} className="md:w-[36px] md:h-[36px] relative z-10 drop-shadow-[0_0_8px_rgba(34,211,238,0.8)] text-cyan-300" />
           </div>
-          <div className={`w-1.5 h-1.5 md:w-2 md:h-2 rounded-full ml-1 md:ml-2 transition-all duration-500 ${status === ConnectionStatus.CONNECTED ? 'bg-cyan-400 animate-pulse shadow-[0_0_10px_rgba(34,211,238,0.8)]' : 'bg-slate-700'}`} />
+          <div className="flex flex-col justify-center">
+            <h1 className="text-xl md:text-2xl tracking-[0.3em] md:tracking-[0.5em] font-bold text-white text-glow-cyan select-none leading-none flex items-center">
+              U<span className="text-cyan-400 opacity-80 mx-0.5">.</span>R<span className="text-cyan-400 opacity-80 mx-0.5">.</span>F<span className="text-cyan-400 opacity-80 mx-0.5">.</span>I
+            </h1>
+            <span className="text-[7px] md:text-[8px] text-cyan-400/60 tracking-[0.2em] md:tracking-[0.3em] font-mono mt-1 uppercase">Neural Interface v2.5</span>
+          </div>
+          <div className={`w-2 h-2 md:w-2.5 md:h-2.5 rounded-full ml-2 md:ml-4 transition-all duration-500 ${status === ConnectionStatus.CONNECTED ? 'bg-cyan-300 animate-pulse shadow-[0_0_12px_rgba(34,211,238,1)]' : 'bg-slate-700 shadow-inner'}`} />
         </div>
         <div className="flex gap-2">
           <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} className="p-2 text-cyan-400/60 hover:text-cyan-400 transition-all rounded-full hover:bg-cyan-500/10 active:scale-95">
@@ -844,7 +875,9 @@ const App: React.FC = () => {
                     <img src={analysisMedia.url} className="w-full h-full object-cover" />
                   )}
                 </div>
-                <span className="text-[8px] md:text-[10px] text-cyan-400 font-bold uppercase tracking-widest">Advanced Media Analysis Mode</span>
+                <span className="text-[8px] md:text-[10px] text-cyan-400 font-bold uppercase tracking-widest">
+                  {analysisMedia.label || 'Advanced Media Analysis Mode'}
+                </span>
               </div>
               <button onClick={() => setAnalysisMedia(null)} className="p-1 hover:bg-white/10 rounded-full text-slate-400 transition-colors">
                 <XIcon />
